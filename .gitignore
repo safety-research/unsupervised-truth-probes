@@ -1,0 +1,5 @@
+results/
+old_results/
+.venv/
+src/__pycache__/
+__pycache__/
