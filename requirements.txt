@@ -1,0 +1,16 @@
+# Jupyter
+jupyter
+ipykernel
+
+# Core ML libraries
+torch
+numpy
+scikit-learn
+
+# Hugging Face libraries
+datasets
+transformers
+accelerate
+
+# Promptsource from GitHub
+git+https://github.com/bigscience-workshop/promptsource.git
