@@ -19,6 +19,7 @@ from .probing import (
     train_supervised_probe,
 )
 from .utils import get_project_root
+from .unsup_elicit import train_fabien_probe
 
 LOADED_MODELS = {}
 LOADED_TOKENIZERS = {}
@@ -31,7 +32,13 @@ def get_results_on_dataset(
     test_size: float = 0.5,
     seed: int = 42,
     batch_size: int = 32,
-    run_methods: List[str] = ["supervised", "model_logits", "ccs", "ccs_saliency"],
+    run_methods: List[str] = [
+        "supervised",
+        "model_logits",
+        "ccs",
+        "fabien",
+        "random",
+    ],
 ) -> List[Dict]:
     """
     Evaluate different methods on a formatted dataset.
@@ -252,8 +259,15 @@ def get_results_on_dataset(
                 train_labels,
                 test_activations,
             )
-        elif method == "ccs_saliency":
-            test_scores = _run_ccs_saliency_method(
+        elif method == "fabien":
+            test_scores = _run_fabien_method(
+                train_pos_activations,
+                train_neg_activations,
+                train_labels,
+                test_activations,
+            )
+        elif method == "random":
+            test_scores = _random_probe_method(
                 train_pos_activations,
                 train_neg_activations,
                 train_labels,
@@ -532,26 +546,32 @@ def _run_ccs_method(
     return torch.sigmoid(test_scores)[:, 0].cpu().tolist()
 
 
-def _run_ccs_saliency_method(
+def _run_fabien_method(
     train_pos_activations: torch.Tensor,
     train_neg_activations: torch.Tensor,
     train_labels: List[int],
     test_activations: torch.Tensor,
 ) -> List[float]:
-    """Run CCS+Saliency method using pre-computed activations."""
     probe = LinearProbe(train_pos_activations.shape[-1], 1).cuda()
-    probe = train_ccs_saliency_probe(
+    probe = train_fabien_probe(
         probe=probe,
         X_pos=train_pos_activations.to(torch.float32),
         X_neg=train_neg_activations.to(torch.float32),
-        num_epochs=5000,
-        lr=0.01,
-        weight_decay=0.01,
-        k_folds=5,
-        saliency_weight=1.0,
-        ccs_weight=1.0,
-        verbose=True,
+        n_iterations=20,
+        n_relabelings=10,
     )
+    test_scores = probe(test_activations.cuda().to(torch.float32))
+    return torch.sigmoid(test_scores)[:, 0].cpu().tolist()
+
+
+def _random_probe_method(
+    train_pos_activations: torch.Tensor,
+    train_neg_activations: torch.Tensor,
+    train_labels: List[int],
+    test_activations: torch.Tensor,
+) -> List[float]:
+    """Run random probe method using pre-computed activations."""
+    probe = LinearProbe(train_pos_activations.shape[-1], 1).cuda()
     test_scores = probe(test_activations.cuda().to(torch.float32))
     return torch.sigmoid(test_scores)[:, 0].cpu().tolist()
 

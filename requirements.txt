@@ -12,5 +12,9 @@ datasets
 transformers
 accelerate
 
+# Plotting
+matplotlib
+seaborn
+
 # Promptsource from GitHub
 git+https://github.com/bigscience-workshop/promptsource.git
