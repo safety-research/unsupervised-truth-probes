@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from datasets import load_dataset
 
-IMPLEMENTED_DATASETS = ["ag_news"]
+IMPLEMENTED_DATASETS = ["imdb", "ag_news"]
 
 
 @dataclass
@@ -112,6 +112,10 @@ def load_dataset_for_ccs(
     # Format based on dataset
     if dataset_name == "ag_news":
         positive_prompts, negative_prompts, ground_truth_labels = format_ag_news(
+            dataset, prefix, prompt_idx
+        )
+    if dataset_name == "imdb":
+        positive_prompts, negative_prompts, ground_truth_labels = format_imdb(
             dataset, prefix, prompt_idx
         )
 
@@ -252,6 +256,43 @@ def format_ag_news(dataset, prefix, prompt_idx):
 
         # Ground truth: 1 if choice 1 is correct, 0 if choice 2 is correct
         ground_truth = 1 if correct_choice == "choice 1" else 0
+
+        positive_prompts.append(pos_prompt)
+        negative_prompts.append(neg_prompt)
+        ground_truth_labels.append(ground_truth)
+
+    return positive_prompts, negative_prompts, ground_truth_labels
+
+
+def format_imdb(dataset, prefix, prompt_idx):
+    """Format IMDB following paper's approach."""
+    positive_prompts = []
+    negative_prompts = []
+    ground_truth_labels = []
+
+    # Paper uses 13 prompts for IMDB
+    templates = [
+        "Consider the following example: '{text}' Between negative and positive, the sentiment of this example is",
+        "Consider the following example: '{text}' Between negative and positive, which is the sentiment of this example?",
+        # Add more templates as specified in the paper
+    ]
+
+    template = templates[prompt_idx % len(templates)]
+
+    for example in dataset:
+        text = example["text"]
+        # IMDB uses label=1 for positive, 0 for negative
+        true_label = "positive" if example["label"] == 1 else "negative"
+
+        # Create base question
+        question = template.format(text=text)
+
+        # Create contrast pairs
+        pos_prompt = f"{prefix}{question} positive"
+        neg_prompt = f"{prefix}{question} negative"
+
+        # Ground truth: 1 if positive is correct, 0 if negative is correct
+        ground_truth = 1 if true_label == "positive" else 0
 
         positive_prompts.append(pos_prompt)
         negative_prompts.append(neg_prompt)

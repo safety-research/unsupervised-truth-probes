@@ -15,6 +15,7 @@ def compute_auroc(results):
         y_scores = [
             r["methods"][method] for r in results if r["methods"][method] is not None
         ]
+        y_scores = [min(score, 10) for score in y_scores]
 
         if len(set(y_true)) > 1:  # Need both classes
             auroc_scores[method] = max(

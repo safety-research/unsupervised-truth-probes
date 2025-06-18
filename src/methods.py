@@ -14,7 +14,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .evals import CCSDataset
 from .probing import LinearProbe, train_ccs_probe, train_supervised_probe
-from .unsup_elicit import train_fabien_probe, train_fabien_probe_incremental
+from .unsup_elicit import train_fabien_probe
 from .utils import get_project_root
 
 LOADED_MODELS = {}
@@ -559,16 +559,12 @@ def _run_fabien_method(
     test_activations: torch.Tensor,
 ) -> List[float]:
     probe = LinearProbe(train_pos_activations.shape[-1], 1).cuda()
-    probe = train_fabien_probe_incremental(
+    probe = train_fabien_probe(
         probe=probe,
         X_pos=train_pos_activations.cuda().to(torch.float32),
         X_neg=train_neg_activations.cuda().to(torch.float32),
-        start_k=50,  # Fabien's actual usage
-        increase_per_turn=2,  # Conservative growth like Fabien
-        n_relabelings=10,  # Number of parallel relabelings
-        relabel_iterations_per_turn=10,  # Relabeling rounds per growth step
-        specialist_probe_kwargs={"num_epochs": 256, "lr": 5e-2},
-        verbose=True,
+        n_iterations=20,
+        n_relabelings=10,
     )
     test_scores = probe(test_activations.cuda().to(torch.float32))
     return torch.sigmoid(test_scores)[:, 0].cpu().tolist()
