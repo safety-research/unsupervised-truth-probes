@@ -8,18 +8,14 @@ import numpy as np
 import torch
 from datasets import load_dataset
 from promptsource.templates import DatasetTemplates
+from sklearn.decomposition import PCA
 from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .evals import CCSDataset
-from .probing import (
-    LinearProbe,
-    train_ccs_probe,
-    train_ccs_saliency_probe,
-    train_supervised_probe,
-)
+from .probing import LinearProbe, train_ccs_probe, train_supervised_probe
+from .unsup_elicit import train_fabien_probe, train_fabien_probe_incremental
 from .utils import get_project_root
-from .unsup_elicit import train_fabien_probe
 
 LOADED_MODELS = {}
 LOADED_TOKENIZERS = {}
@@ -36,7 +32,8 @@ def get_results_on_dataset(
         "supervised",
         "model_logits",
         "ccs",
-        "fabien",
+        "fabiens_method",
+        "pca",
         "random",
     ],
 ) -> List[Dict]:
@@ -259,8 +256,15 @@ def get_results_on_dataset(
                 train_labels,
                 test_activations,
             )
-        elif method == "fabien":
+        elif method == "fabiens_method":
             test_scores = _run_fabien_method(
+                train_pos_activations,
+                train_neg_activations,
+                train_labels,
+                test_activations,
+            )
+        elif method == "pca":
+            test_scores = _run_pca_method(
                 train_pos_activations,
                 train_neg_activations,
                 train_labels,
@@ -549,16 +553,22 @@ def _run_ccs_method(
 def _run_fabien_method(
     train_pos_activations: torch.Tensor,
     train_neg_activations: torch.Tensor,
-    train_labels: List[int],
+    train_labels: List[
+        int
+    ],  # Note: This parameter isn't used since Fabien discovers labels
     test_activations: torch.Tensor,
 ) -> List[float]:
     probe = LinearProbe(train_pos_activations.shape[-1], 1).cuda()
-    probe = train_fabien_probe(
+    probe = train_fabien_probe_incremental(
         probe=probe,
-        X_pos=train_pos_activations.to(torch.float32),
-        X_neg=train_neg_activations.to(torch.float32),
-        n_iterations=20,
-        n_relabelings=10,
+        X_pos=train_pos_activations.cuda().to(torch.float32),
+        X_neg=train_neg_activations.cuda().to(torch.float32),
+        start_k=50,  # Fabien's actual usage
+        increase_per_turn=2,  # Conservative growth like Fabien
+        n_relabelings=10,  # Number of parallel relabelings
+        relabel_iterations_per_turn=10,  # Relabeling rounds per growth step
+        specialist_probe_kwargs={"num_epochs": 256, "lr": 5e-2},
+        verbose=True,
     )
     test_scores = probe(test_activations.cuda().to(torch.float32))
     return torch.sigmoid(test_scores)[:, 0].cpu().tolist()
@@ -574,6 +584,79 @@ def _random_probe_method(
     probe = LinearProbe(train_pos_activations.shape[-1], 1).cuda()
     test_scores = probe(test_activations.cuda().to(torch.float32))
     return torch.sigmoid(test_scores)[:, 0].cpu().tolist()
+
+
+def _run_pca_method(
+    train_pos_activations: torch.Tensor,
+    train_neg_activations: torch.Tensor,
+    train_labels: List[int],
+    test_activations: torch.Tensor,
+) -> List[float]:
+    """
+    Run PCA method to find the principal component that best separates
+    positive and negative activations, then project test activations onto it.
+
+    The idea is that the first principal component of the combined data
+    should capture the main direction of variation, which hopefully
+    corresponds to the true/false distinction.
+
+    Args:
+        train_pos_activations: Training activations from positive prompts
+        train_neg_activations: Training activations from negative prompts
+        train_labels: Ground truth labels (not used in this unsupervised method)
+        test_activations: Test activations to score
+
+    Returns:
+        List of normalized scores between 0 and 1
+    """
+    # Convert tensors to numpy arrays for sklearn
+    train_pos_np = train_pos_activations.cpu().numpy()
+    train_neg_np = train_neg_activations.cpu().numpy()
+    test_np = test_activations.cpu().numpy()
+
+    # Combine training activations
+    combined_activations = np.concatenate([train_pos_np, train_neg_np], axis=0)
+
+    # Fit PCA to find the principal component
+    pca = PCA(n_components=1)
+    pca.fit(combined_activations)
+
+    # Project test activations onto the first principal component
+    test_projections = pca.transform(test_np).flatten()
+
+    # Project training activations to determine which direction is positive
+    train_pos_projections = pca.transform(train_pos_np).flatten()
+    train_neg_projections = pca.transform(train_neg_np).flatten()
+
+    # Determine if we need to flip the direction
+    # If positive activations have lower mean projection than negative,
+    # we should flip the scores
+    pos_mean = np.mean(train_pos_projections)
+    neg_mean = np.mean(train_neg_projections)
+
+    if pos_mean < neg_mean:
+        test_projections = -test_projections
+
+    # Normalize scores to [0, 1] range using min-max normalization
+    # We'll use the training data range to determine normalization
+    all_train_projections = np.concatenate(
+        [train_pos_projections, train_neg_projections]
+    )
+    if pos_mean < neg_mean:
+        all_train_projections = -all_train_projections
+
+    min_val = np.min(all_train_projections)
+    max_val = np.max(all_train_projections)
+
+    # Avoid division by zero
+    if max_val == min_val:
+        normalized_scores = np.full_like(test_projections, 0.5)
+    else:
+        normalized_scores = (test_projections - min_val) / (max_val - min_val)
+        # Clip to [0, 1] range in case test data is outside training range
+        normalized_scores = np.clip(normalized_scores, 0.0, 1.0)
+
+    return normalized_scores.tolist()
 
 
 def _save_results(results: List[float], filename: str):
