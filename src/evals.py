@@ -214,53 +214,43 @@ def format_ag_news(dataset, prefix, prompt_idx):
     positive_prompts = []
     negative_prompts = []
     ground_truth_labels = []
-
     label_names = ["World politics", "Sports", "Business", "Science and technology"]
-
     # Paper uses 8 prompts for AG News
     templates = [
-        "Consider the following example: '{text}' Choice 1: {label0}. Choice 2: {label1}. Between choice 1 and choice 2, the topic of this example is",
-        "Consider the following example: '{text}' Choice 1: {label0}. Choice 2: {label1}. Between choice 1 and choice 2, what is the topic of this example?",
-        "Consider the following example: '{text}' Which is the topic of this example, choice 1: {label0}, or choice 2: {label1}?",
-        "{text} Choice 1: {label0}. Choice 2: {label1}. Between choice 1 and choice 2, the topic of this example is",
-        "{text} Choice 1: {label0}. Choice 2: {label1}. Between choice 1 and choice 2, what is the topic of this example?",
-        "{text} Which is the topic of this example, choice 1: {label0}, or choice 2: {label1}?",
-        "{text} What label best describes this news article, choice 1: {label0}, or choice 2: {label1}?",
-        "{text} Which section of a newspaper would this article likely appear in, choice 1: {label0}, or choice 2: {label1}?",
+        "Consider the following example: '{text}'. Assertion: the topic of this example is {label}. Answer True or False.",
+        "Consider the following example: '{text}'. Is the topic of this example {label}? Answer True or False.",
+        "Consider the following example: '{text}'. Would you say the topic of this example is {label}? Answer True or False.",
+        "{text} Assertion: the topic of this example is {label}. Answer True or False.",
+        "{text} Is the topic of this example {label}? Answer True or False.",
+        "{text} Would you say the topic of this example is {label}? Answer True or False.",
+        "{text} Does {label} best describe this news article? Answer True or False.",
+        "{text} Would this article appear in the {label} section of a newspaper? Answer True or False.",
     ]
-
     template = templates[prompt_idx % len(templates)]
-
     for example in dataset:
         text = example["text"]
         true_label = label_names[example["label"]]
-
         # Randomly select one incorrect label
         incorrect_labels = [l for l in label_names if l != true_label]
         false_label = random.choice(incorrect_labels)
-
         # Randomly assign to label0 and label1
         if random.random() < 0.5:
-            label0, label1 = true_label, false_label
-            correct_choice = "choice 1"
+            label = true_label
+            correct_choice = "True"
         else:
-            label0, label1 = false_label, true_label
-            correct_choice = "choice 2"
-
+            label = false_label
+            correct_choice = "False"
         # Create base question
-        question = template.format(text=text, label0=label0, label1=label1)
-
+        question = template.format(text=text, label=label)
         # Create contrast pairs
-        pos_prompt = f"{prefix}{question} choice 1"
-        neg_prompt = f"{prefix}{question} choice 2"
-
+        pos_prompt = f"{prefix}{question} True"
+        neg_prompt = f"{prefix}{question} False"
         # Ground truth: 1 if choice 1 is correct, 0 if choice 2 is correct
-        ground_truth = 1 if correct_choice == "choice 1" else 0
-
+        ground_truth = 1 if correct_choice == "True" else 0
         positive_prompts.append(pos_prompt)
         negative_prompts.append(neg_prompt)
         ground_truth_labels.append(ground_truth)
-
+        
     return positive_prompts, negative_prompts, ground_truth_labels
 
 
