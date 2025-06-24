@@ -34,7 +34,7 @@ def get_results_on_dataset(
         "ccs",
         "fabiens_method",
         "pca",
-        "random",
+        "random"
     ],
 ) -> List[Dict]:
     """

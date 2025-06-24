@@ -4,3 +4,7 @@ old_results/
 src/__pycache__/
 __pycache__/
 **/__pycache__/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
