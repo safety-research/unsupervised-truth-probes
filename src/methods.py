@@ -5,7 +5,9 @@ from collections import Counter
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+import copy
 import torch
+from torch.utils.data import DataLoader, Dataset
 from datasets import load_dataset
 from promptsource.templates import DatasetTemplates
 from sklearn.decomposition import PCA
@@ -36,6 +38,7 @@ def get_results_on_dataset(
         "pca",
         "random"
     ],
+    full_finetune: bool = False,  # New parameter for zs_finetune method
 ) -> List[Dict]:
     """
     Evaluate different methods on a formatted dataset.
@@ -48,6 +51,7 @@ def get_results_on_dataset(
         seed: Random seed for reproducibility
         batch_size: Batch size for processing
         run_methods: List of methods to evaluate
+        full_finetune: Whether to finetune full model (True) or just head (False) for zs_finetune method
 
     Returns:
         List of dicts with results for each test example
@@ -276,6 +280,15 @@ def get_results_on_dataset(
                 train_neg_activations,
                 train_labels,
                 test_activations,
+            )
+        elif method == "zs_finetune":
+            test_scores = _run_zs_finetune(
+                model, tokenizer,
+                train_indices,
+                pos_logits, neg_logits,
+                positive_prompts, negative_prompts,
+                positive_token_id, negative_token_id,
+                test_prompts, full_finetune=full_finetune,
             )
         else:
             raise NotImplementedError(f"Method {method} not implemented")
@@ -654,6 +667,274 @@ def _run_pca_method(
 
     return normalized_scores.tolist()
 
+class _PseudoLabelDataset(Dataset):
+    def __init__(self, tok, prompts: List[str], tgt_ids: List[int]):
+        self.enc = tok(prompts, return_tensors="pt", padding=True, truncation=True, max_length=512)
+        self.tgt = torch.tensor(tgt_ids, dtype=torch.long)
+
+    def __len__(self):  
+        return len(self.tgt)
+
+    def __getitem__(self, i):
+        item = {k: v[i] for k, v in self.enc.items()}
+        item["target_token_id"] = self.tgt[i]
+        return item
+
+def _run_zs_finetune(
+    model,
+    tokenizer,
+    train_indices: List[int],
+    pos_logits: torch.Tensor,
+    neg_logits: torch.Tensor,
+    positive_prompts: List[str],
+    negative_prompts: List[str],
+    pos_tok: int,
+    neg_tok: int,
+    test_prompts: List[str],
+    epochs: int = 5,
+    lr: float = 1e-4,  # Much higher learning rate
+    batch_size: int = 4,
+    full_finetune: bool = False,  # New parameter: True for full model, False for head only
+) -> List[float]:
+    """Simple zero-shot finetuning that returns valid scores."""
+    
+    device = next(model.parameters()).device
+    
+    train_pos_logits = pos_logits[train_indices]
+    train_neg_logits = neg_logits[train_indices]
+    
+    with torch.no_grad():
+        pos_probs = torch.softmax(train_pos_logits.float(), dim=-1)[:, pos_tok]
+        neg_probs = torch.softmax(train_neg_logits.float(), dim=-1)[:, neg_tok]
+        
+        # Use confidence-based pseudo-labeling
+        prob_diff = torch.abs(pos_probs - neg_probs)
+        confidence_threshold = prob_diff.quantile(0.3)  # Use top 70% most confident
+        
+        confident_mask = prob_diff >= confidence_threshold
+        confident_indices = torch.where(confident_mask)[0].tolist()
+        
+        if len(confident_indices) < 5:
+            print("Not enough confident pseudo-labels, using all training data")
+            confident_indices = list(range(len(train_indices)))
+        
+        pseudo_labels = (pos_probs > neg_probs).long()
+
+    # Build training data from confident examples only
+    train_prompts, target_ids = [], []
+    for i in confident_indices:
+        train_idx = train_indices[i]
+        if pseudo_labels[i].item():
+            train_prompts.append(positive_prompts[train_idx])
+            target_ids.append(pos_tok)
+        else:
+            train_prompts.append(negative_prompts[train_idx])
+            target_ids.append(neg_tok)
+    
+    print(f"Using {len(train_prompts)} confident training examples")
+    print(f"Positive labels: {sum(pseudo_labels[confident_indices])}/{len(confident_indices)}")
+    print(f"Finetuning mode: {'Full model' if full_finetune else 'Head only'}")
+    
+    if len(train_prompts) < 3:
+        print("Too few training examples, falling back to model logits")
+        # Compute logits for test prompts and call existing method directly
+        test_logits, test_final_tokens = [], []
+        model.eval()
+        with torch.no_grad():
+            for i in range(0, len(test_prompts), batch_size):
+                batch_prompts = test_prompts[i:i+batch_size]
+                enc = tokenizer(batch_prompts, return_tensors="pt", padding=True, truncation=True, max_length=512)
+                enc = {k: v.to(device) for k, v in enc.items()}
+                
+                out = model(**enc)
+                last_pos = enc["attention_mask"].sum(dim=1) - 1
+                penult_pos = last_pos - 1
+                batch_idx = torch.arange(len(enc["input_ids"]), device=device)
+                
+                logits = out.logits[batch_idx, penult_pos]
+                final_tokens = enc["input_ids"][batch_idx, last_pos]
+                
+                test_logits.append(logits.cpu())
+                test_final_tokens.append(final_tokens.cpu())
+        
+        test_logits = torch.cat(test_logits, dim=0)
+        test_final_tokens = torch.cat(test_final_tokens, dim=0)
+        return _run_model_logits_method(test_logits, test_final_tokens, pos_tok, neg_tok)
+    
+    # Store original model state
+    if full_finetune:
+        # Store all parameters for full finetuning
+        original_state = {name: param.data.clone() for name, param in model.named_parameters()}
+        original_requires_grad = [p.requires_grad for p in model.parameters()]
+    else:
+        # Store only head parameters for head-only finetuning
+        head = model.get_output_embeddings()
+        original_weight = head.weight.data.clone()
+        original_bias = head.bias.data.clone() if head.bias is not None else None
+        original_requires_grad = [p.requires_grad for p in model.parameters()]
+    
+    try:
+        # Set up parameters for training
+        if full_finetune:
+            # Enable gradients for all parameters
+            for p in model.parameters():
+                p.requires_grad = True
+            trainable_params = list(model.parameters())
+        else:
+            # Freeze everything except output head
+            for p in model.parameters():
+                p.requires_grad = False
+            head = model.get_output_embeddings()
+            for p in head.parameters():
+                p.requires_grad = True
+            trainable_params = list(head.parameters())
+            
+        ds = _PseudoLabelDataset(tokenizer, train_prompts, target_ids)
+        dl = DataLoader(ds, batch_size=batch_size, shuffle=True)
+        
+        # Adjust learning rate based on finetuning type
+        effective_lr = lr if not full_finetune else lr / 10  # Lower LR for full finetuning
+        opt = torch.optim.AdamW(trainable_params, lr=effective_lr, weight_decay=0.01)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, patience=2, factor=0.5)
+        
+        model.train()
+        
+        best_loss = float('inf')
+        patience = 3
+        patience_counter = 0
+        
+        for epoch in range(epochs):
+            total_loss = 0.0
+            n_batches = 0
+            
+            for batch in dl:
+                ids = batch["input_ids"].to(device)
+                mask = batch["attention_mask"].to(device) 
+                tgt = batch["target_token_id"].to(device)
+                
+                # Skip if any sequence is too short
+                if (mask.sum(dim=1) < 2).any():
+                    continue
+                
+                opt.zero_grad()
+                
+                out = model(input_ids=ids, attention_mask=mask)
+                
+                last_pos = mask.sum(dim=1) - 1
+                penult_pos = last_pos - 1
+                
+                batch_idx = torch.arange(len(ids), device=device)
+                logits = out.logits[batch_idx, penult_pos]
+                
+                loss = torch.nn.functional.cross_entropy(logits, tgt, reduction='mean')
+                
+                # Skip if loss is NaN or too large
+                if torch.isnan(loss) or loss > 20:
+                    print(f"Skipping bad loss: {loss.item()}")
+                    continue
+                    
+                loss.backward()
+                # Use different gradient clipping for full vs head finetuning
+                grad_clip = 0.1 if full_finetune else 0.5
+                torch.nn.utils.clip_grad_norm_(trainable_params, grad_clip)
+                opt.step()
+                
+                total_loss += loss.item()
+                n_batches += 1
+                
+            if n_batches == 0:
+                print("No valid batches, falling back to model logits")
+                # Compute logits for test prompts and call existing method directly
+                test_logits, test_final_tokens = [], []
+                model.eval()
+                with torch.no_grad():
+                    for i in range(0, len(test_prompts), batch_size):
+                        batch_prompts = test_prompts[i:i+batch_size]
+                        enc = tokenizer(batch_prompts, return_tensors="pt", padding=True, truncation=True, max_length=512)
+                        enc = {k: v.to(device) for k, v in enc.items()}
+                        
+                        out = model(**enc)
+                        last_pos = enc["attention_mask"].sum(dim=1) - 1
+                        penult_pos = last_pos - 1
+                        batch_idx = torch.arange(len(enc["input_ids"]), device=device)
+                        
+                        logits = out.logits[batch_idx, penult_pos]
+                        final_tokens = enc["input_ids"][batch_idx, last_pos]
+                        
+                        test_logits.append(logits.cpu())
+                        test_final_tokens.append(final_tokens.cpu())
+                
+                test_logits = torch.cat(test_logits, dim=0)
+                test_final_tokens = torch.cat(test_final_tokens, dim=0)
+                return _run_model_logits_method(test_logits, test_final_tokens, pos_tok, neg_tok)
+                
+            avg_loss = total_loss / n_batches
+            scheduler.step(avg_loss)
+            
+            print(f"Epoch {epoch+1}: Loss = {avg_loss:.4f}, LR = {opt.param_groups[0]['lr']:.6f}")
+            
+            # Early stopping
+            if avg_loss < best_loss:
+                best_loss = avg_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    print(f"Early stopping at epoch {epoch+1}")
+                    break
+                
+        model.eval()
+        
+        # Generate predictions
+        scores = []
+        
+        with torch.no_grad():
+            for i in range(0, len(test_prompts), batch_size):
+                batch_prompts = test_prompts[i:i+batch_size]
+                enc = tokenizer(batch_prompts, return_tensors="pt", padding=True, truncation=True, max_length=512)
+                enc = {k: v.to(device) for k, v in enc.items()}
+                
+                out = model(**enc)
+                
+                last_pos = enc["attention_mask"].sum(dim=1) - 1
+                penult_pos = last_pos - 1
+                batch_idx = torch.arange(len(enc["input_ids"]), device=device)
+                
+                logits = out.logits[batch_idx, penult_pos]
+                probs = torch.softmax(logits.float(), dim=-1)
+                
+                pos_probs = probs[:, pos_tok]
+                neg_probs = probs[:, neg_tok]
+                
+                # Compute relative probability P(pos) / (P(pos) + P(neg))
+                total_probs = pos_probs + neg_probs + 1e-8
+                batch_scores = pos_probs / total_probs
+                
+                batch_scores = batch_scores.cpu().numpy()
+                batch_scores = np.where(np.isfinite(batch_scores), batch_scores, 0.5)
+                
+                scores.extend(batch_scores.tolist())
+        
+    finally:
+        # Restore original state
+        if full_finetune:
+            # Restore all parameters
+            for name, param in model.named_parameters():
+                param.data = original_state[name]
+            for p, orig_grad in zip(model.parameters(), original_requires_grad):
+                p.requires_grad = orig_grad
+        else:
+            # Restore only head parameters
+            head = model.get_output_embeddings()
+            head.weight.data = original_weight
+            if original_bias is not None:
+                head.bias.data = original_bias
+            for p, orig_grad in zip(model.parameters(), original_requires_grad):
+                p.requires_grad = orig_grad
+            
+        print("Model state restored")
+    
+    return scores
 
 def _save_results(results: List[float], filename: str):
     """Save results to a JSON file.
