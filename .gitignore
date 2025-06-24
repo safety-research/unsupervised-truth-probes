@@ -8,3 +8,8 @@ __pycache__/
 # Jupyter Notebook checkpoints
 .ipynb_checkpoints/
 **/.ipynb_checkpoints/
+
+# Python package build artifacts
+*.egg-info/
+build/
+dist/

@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unsupervised-truth-probes"
+version = "0.1.0"
+requires-python = ">=3.8"
+dependencies = [
+    "torch",
+    "numpy",
+    "scikit-learn",
+    "datasets",
+    "transformers",
+    "accelerate",
+    "matplotlib",
+    "seaborn",
+    "tqdm",
+    "ipykernel",
+]
+
+[project.optional-dependencies]
+dev = [
+    "jupyter",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.setuptools.package-dir]
+"" = "." 

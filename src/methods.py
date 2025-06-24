@@ -2,12 +2,10 @@ import json
 import os
 import random
 from collections import Counter
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
-from datasets import load_dataset
-from promptsource.templates import DatasetTemplates
 from sklearn.decomposition import PCA
 from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
