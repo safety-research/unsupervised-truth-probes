@@ -1,5 +1,6 @@
 results/
 old_results/
+data/
 .venv/
 src/__pycache__/
 __pycache__/
