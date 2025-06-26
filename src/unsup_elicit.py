@@ -1,6 +1,7 @@
 from src.probing import *
 from src.utils import *
 
+import time
 
 def cross_entropy_last_dim(input, target):
     """
@@ -210,8 +211,8 @@ def train_fabien_probe(
     probe: Probe,
     X_pos: torch.Tensor,  # (N, D) - "Question? Yes" features
     X_neg: torch.Tensor,  # (N, D) - "Question? No" features
-    n_iterations: int = 20,
-    n_relabelings: int = 10,
+    n_iterations: int = 50,
+    n_relabelings: int = 30,
     specialist_probe_kwargs: dict = {"num_epochs": 256, "lr": 5e-2},
     verbose: bool = True,
 ):
@@ -221,6 +222,7 @@ def train_fabien_probe(
     Uses iterative co-training to discover consistent labels, then trains
     the probe on the discovered labels.
     """
+    start_time = time.time()
     n_samples = len(X_pos)
     device = X_pos.device
 
@@ -238,9 +240,9 @@ def train_fabien_probe(
         )
 
     # Main co-training loop
-    pbar = tqdm(range(n_iterations), desc="Fabien Co-Training", disable=not verbose)
+    # pbar = tqdm(, desc="Fabien Co-Training", disable=not verbose)
 
-    for iteration in pbar:
+    for iteration in range(n_iterations):
         # Generate candidate relabelings through co-training
         relabelings = get_relabelings(
             X_pos,
@@ -279,9 +281,9 @@ def train_fabien_probe(
         y = best_relabeling
 
         # Update progress
-        pbar.set_postfix({"Loss": f"{best_loss:.4f}"})
+    #     pbar.set_postfix({"Loss": f"{best_loss:.4f}"})
 
-    pbar.close()
+    # pbar.close()
 
     # Train final probe on discovered labels
     X_combined = torch.cat([X_pos, X_neg], dim=0)  # (2N, D)
@@ -297,8 +299,105 @@ def train_fabien_probe(
         **specialist_probe_kwargs,
     )
 
-    if verbose:
-        final_pos = y.sum().item()
-        print(f"Training complete. Final labels: {final_pos}/{n_samples} positive")
+    # if verbose:
+    #     final_pos = y.sum().item()
+    #     print(f"Training complete. Final labels: {final_pos}/{n_samples} positive")
+
+    end_time = time.time()
+    print(f"Time taken: {end_time - start_time:.2f} seconds")
 
     return trained_probe
+
+import torch
+import torch.nn.functional as F
+import math
+
+def train_fabien_probe_exponential(
+    probe: MultiLinearProbe,
+    X_pos: torch.Tensor,          # (N, D)
+    X_neg: torch.Tensor,          # (N, D)
+    max_iterations: int = 50,
+    n_relabelings: int = 30,
+    growth_factor: float = 2.0,
+    min_batch: int = 2,
+    specialist_probe_kwargs: dict = {"num_epochs": 256, "lr": 5e-2},
+    k_folds: int = 5,
+    early_stop_tol: float = 1e-4,
+    verbose: bool = True,
+) -> MultiLinearProbe:
+    """
+    Co‐training with exponentially growing batch sizes.
+    At iteration i, we relabel only `current_batch` samples
+    (doubling each time) until we reach N, then do final training on all N.
+    """
+    start_time = time.time()
+    device = X_pos.device
+    N, D = X_pos.size()
+
+    # fixed random ordering so growth is deterministic
+    perm = torch.randperm(N, device=device)
+
+    # initialize full‐dataset labels (random)
+    y_full = torch.randint(0, 2, (N,), device=device).long()
+
+    current_batch = min_batch
+    last_loss = float("inf")
+
+    for it in range(max_iterations):
+        # exponentially grow the subset
+        current_batch = min(int(current_batch * growth_factor), N)
+        idx = perm[:current_batch]
+
+        Xp, Xn, y_sub = X_pos[idx], X_neg[idx], y_full[idx]
+
+        # generate co‐training relabel candidates on the subset
+        candidates = get_relabelings(
+            Xp, Xn, y_sub,
+            n_relabelings=n_relabelings,
+            specialist_probe_kwargs=specialist_probe_kwargs,
+        )
+
+        # pick best relabeling by k‐fold loss on the subset
+        best_loss = float("inf")
+        best_y   = None
+        for cand in candidates:
+            Xc = torch.cat([Xp, Xn], dim=0)
+            yc = torch.cat([cand, 1 - cand], dim=0)
+            loss = compute_kfold_loss(
+                Xc, yc,
+                k_folds=k_folds,
+                specialist_probe_kwargs=specialist_probe_kwargs,
+            )
+            if loss < best_loss:
+                best_loss, best_y = loss, cand
+
+        # stop if no significant improvement
+        if not math.isfinite(best_loss) or (last_loss - best_loss) < early_stop_tol:
+            # if verbose:
+            #     print(f"[iter {it}] stopping early (loss plateaued at {best_loss:.4f})")
+            break
+        last_loss = best_loss
+
+        # update full‐dataset labels on this subset
+        y_full[idx] = best_y
+
+        # if verbose:
+        #     print(f"[iter {it}] subset={current_batch:<4}  best_loss={best_loss:.4f}")
+
+    # final training on the entire dataset
+    X_full  = torch.cat([X_pos, X_neg], dim=0)
+    y_final = torch.cat([y_full, 1 - y_full], dim=0).float().unsqueeze(-1)
+
+    # if verbose:
+    #     print("Final training on full dataset…")
+    trained = train_supervised_probe(
+        probe, X_full, y_final,
+        verbose=verbose,
+        loss_fn=F.binary_cross_entropy_with_logits,
+        **specialist_probe_kwargs,
+    )
+
+    end_time = time.time()
+    print(f"Time taken: {end_time - start_time:.2f} seconds")
+
+    return trained

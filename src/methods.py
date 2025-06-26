@@ -14,7 +14,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .evals import CCSDataset
 from .probing import LinearProbe, train_ccs_probe, train_supervised_probe
-from .unsup_elicit import train_fabien_probe
+from .unsup_elicit import train_fabien_probe, train_fabien_probe_exponential
 from .utils import get_project_root
 
 LOADED_MODELS = {}
@@ -258,6 +258,13 @@ def get_results_on_dataset(
             )
         elif method == "fabiens_method":
             test_scores = _run_fabien_method(
+                train_pos_activations,
+                train_neg_activations,
+                train_labels,
+                test_activations,
+            )
+        elif method == "fabiens_method_exponential":
+            test_scores = _run_fabien_method_exponential(
                 train_pos_activations,
                 train_neg_activations,
                 train_labels,
@@ -564,6 +571,25 @@ def _run_fabien_method(
         X_pos=train_pos_activations.cuda().to(torch.float32),
         X_neg=train_neg_activations.cuda().to(torch.float32),
         n_iterations=20,
+        n_relabelings=10,
+    )
+    test_scores = probe(test_activations.cuda().to(torch.float32))
+    return torch.sigmoid(test_scores)[:, 0].cpu().tolist()
+
+def _run_fabien_method_exponential(
+    train_pos_activations: torch.Tensor,
+    train_neg_activations: torch.Tensor,
+    train_labels: List[
+        int
+    ],  # Note: This parameter isn't used since Fabien discovers labels
+    test_activations: torch.Tensor,
+) -> List[float]:
+    probe = LinearProbe(train_pos_activations.shape[-1], 1).cuda()
+    probe = train_fabien_probe_exponential(
+        probe=probe,
+        X_pos=train_pos_activations.cuda().to(torch.float32),
+        X_neg=train_neg_activations.cuda().to(torch.float32),
+        max_iterations=20,
         n_relabelings=10,
     )
     test_scores = probe(test_activations.cuda().to(torch.float32))
