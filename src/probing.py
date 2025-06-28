@@ -1,4 +1,4 @@
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 import torch
 import torch.nn.functional as F
@@ -82,7 +82,7 @@ def train_supervised_probe(
     y: torch.Tensor,  # (N,) or (N, K)
     num_epochs: int = 128,
     lr: float = 0.001,
-    batch_size: int = None,
+    batch_size: Optional[int] = None,
     loss_fn=F.cross_entropy,
     weight_decay: float = 0.01,
     verbose: bool = True,
