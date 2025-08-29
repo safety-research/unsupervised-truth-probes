@@ -92,7 +92,6 @@ matplotlib-inline==0.1.7
 mccabe==0.7.0
 mistune==3.1.4
 mpmath==1.3.0
-mppr @ git+https://github.com/mishajw/mppr.git@8773ad65add584b53d5488ba3974ea8847884a9c
 multidict==6.6.4
 multiprocess==0.70.16
 multivolumefile==0.2.3
@@ -134,7 +133,6 @@ plotly==5.24.1
 pluggy==1.6.0
 prometheus_client==0.22.1
 prompt_toolkit==3.0.52
-promptsource @ git+https://github.com/bigscience-workshop/promptsource.git@7dab96a3eeb3717cea633705135ebc488885d709
 propcache==0.3.2
 protobuf==6.32.0
 psutil==7.0.0
