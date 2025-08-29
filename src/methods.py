@@ -39,6 +39,7 @@ def get_results_on_dataset(
         "random",
         "icm"
     ],
+    no_leakage: bool = True,
 ) -> List[Dict]:
     """
     Evaluate different methods on a formatted dataset.
@@ -70,6 +71,7 @@ def get_results_on_dataset(
     assert len(positive_prompts) == len(negative_prompts) == len(ground_truth_labels)
     assert all(label in [0, 1] for label in ground_truth_labels)
     assert 0 < test_size < 1, "test_size must be between 0 and 1"
+    print(f"Ground truth labels len: {len(ground_truth_labels)}, true labels: {sum(ground_truth_labels)}, false labels: {len(ground_truth_labels) - sum(ground_truth_labels)}")
 
     # Split into train and test
     n_examples = len(positive_prompts)
@@ -98,11 +100,13 @@ def get_results_on_dataset(
             test_prompts.append(negative_prompts[i])
             # Label: 0 if ground truth says positive is correct, 1 if negative is correct
             test_labels.append(1 - ground_truth_labels[i])
+    
+    print(f"Num test labels: {len(test_labels)}, true labels: {sum(test_labels)}, false labels: {len(test_labels) - sum(test_labels)}")
 
     # Check if all the results are already saved
     all_cached = check_all_saved(dataset_name, model_name, layer_idx, run_methods)
 
-    if all_cached:
+    if False: # all_cached:
         print("All results are already saved, skipping model computation")
         # Set these to None since we won't need them
         model = None
@@ -156,24 +160,34 @@ def get_results_on_dataset(
             model, tokenizer, negative_prompts, layer_idx, batch_size
         )
 
-        # Remove the mean of the pos and neg activations
-        pos_activations = pos_activations - pos_activations.mean(dim=0, keepdim=True)
-        neg_activations = neg_activations - neg_activations.mean(dim=0, keepdim=True)
-
-        # After mean centering
-        pos_norm = pos_activations.norm(dim=1).mean() * np.sqrt(
-            pos_activations.shape[1]
-        )
-        neg_norm = neg_activations.norm(dim=1).mean() * np.sqrt(
-            neg_activations.shape[1]
-        )
-        pos_activations = pos_activations / pos_norm
-        neg_activations = neg_activations / neg_norm
-
         # Split activations by train/test indices
         train_pos_activations = pos_activations[train_indices]
         train_neg_activations = neg_activations[train_indices]
         train_labels = [ground_truth_labels[i] for i in train_indices]
+
+        print(f"Num train labels: {len(train_labels)}, true labels: {sum(train_labels)}, false labels: {len(train_labels) - sum(train_labels)}")
+
+        # Remove the mean of the pos and neg activations
+        if no_leakage:
+            train_pos_mean = train_pos_activations.mean(dim=0, keepdim=True)
+            train_neg_mean = train_neg_activations.mean(dim=0, keepdim=True)
+            train_pos_norm = (train_pos_activations - train_pos_mean).norm(dim=1).mean() * np.sqrt(
+                train_pos_activations.shape[1]
+            )
+            train_neg_norm = (train_neg_activations - train_neg_mean).norm(dim=1).mean() * np.sqrt(
+                train_neg_activations.shape[1]
+            )
+        else:
+            train_pos_mean = pos_activations.mean(dim=0, keepdim=True)
+            train_neg_mean = neg_activations.mean(dim=0, keepdim=True)
+            train_pos_norm = (train_pos_activations - train_pos_mean).norm(dim=1).mean() * np.sqrt(
+                train_pos_activations.shape[1]
+            )
+            train_neg_norm = (train_neg_activations - train_neg_mean).norm(dim=1).mean() * np.sqrt(
+                train_neg_activations.shape[1]
+            )
+        train_pos_activations = (train_pos_activations - train_pos_mean) / train_pos_norm
+        train_neg_activations = (train_neg_activations - train_neg_mean) / train_neg_norm
 
         # For test: use the same logic to pick activations that match our prompt selection
         test_activations = []
@@ -197,12 +211,12 @@ def get_results_on_dataset(
             # Use the same random choice logic
             if random.random() < 0.5:
                 # Used positive claim
-                test_activations.append(pos_activations[i])
+                test_activations.append((pos_activations[i] - train_pos_mean) / train_pos_norm)
                 test_logits.append(pos_logits[i])
                 test_final_tokens.append(pos_final_tokens[i])
             else:
                 # Used negative claim
-                test_activations.append(neg_activations[i])
+                test_activations.append((neg_activations[i] - train_neg_mean) / train_neg_norm)
                 test_logits.append(neg_logits[i])
                 test_final_tokens.append(neg_final_tokens[i])
 
@@ -227,16 +241,16 @@ def get_results_on_dataset(
             / f"{dataset_name}.json"
         )
 
-        if os.path.exists(str(file_path)):
-            test_scores = _load_results(str(file_path))
-            method_results[method] = test_scores
-            continue
+        # if os.path.exists(str(file_path)):
+        #     test_scores = _load_results(str(file_path))
+        #     method_results[method] = test_scores
+        #     continue
 
-        # If we get here and everything was cached, something went wrong
-        if all_cached:
-            raise RuntimeError(
-                f"Expected cached results for {method} but file {file_path} not found"
-            )
+        # # If we get here and everything was cached, something went wrong
+        # if all_cached:
+        #     raise RuntimeError(
+        #         f"Expected cached results for {method} but file {file_path} not found"
+        #     )
 
         # Guard against None values - should not happen if not all_cached
         assert train_pos_activations is not None
@@ -1084,12 +1098,13 @@ def _run_pca_method(
     train_neg_np = train_neg_activations.cpu().numpy()
     test_np = test_activations.cpu().numpy()
 
-    # Combine training activations
-    combined_activations = np.concatenate([train_pos_np, train_neg_np], axis=0)
+    # # Combine training activations
+    # combined_activations = np.concatenate([train_pos_np, train_neg_np], axis=0)
+    activation_diffs = train_pos_np - train_neg_np
 
     # Fit PCA to find the principal component
     pca = PCA(n_components=1)
-    pca.fit(combined_activations)
+    pca.fit(activation_diffs)
 
     # Project test activations onto the first principal component
     test_projections = pca.transform(test_np).flatten()
